@@ -1,0 +1,809 @@
+// ==UserScript==
+// @name         Kombiniertes Wachen-Bau & Personal-Manager Skript (1+2)
+// @namespace    https://leitstellenspiel.de/
+// @version      2.4
+// @description  Kombiniertes Skript: Baut Wachen automatisch und konfiguriert sofort Personal-Sollstärken + automatisches Werben
+// @match        https://www.leitstellenspiel.de/
+// @match        https://polizei.leitstellenspiel.de/*
+// @grant        GM_xmlhttpRequest
+// @run-at       document-idle
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // =======================
+    // Globale Variablen
+    // =======================
+    let currentMarkers = [];
+    let currentPois = [];
+    let isBuilding = false;
+    let userBuildings = [];
+    let selectedLeitstelle = '';
+    let selectedBuildingType = 11;
+    let currentCityName = '';
+    let layoutMode = 'grid';
+    let isEditMode = false;
+
+    // Personal-Manager Einstellungen
+    const personnelSettings = {
+        0: 250,   // Feuerwache
+        18: 250,  // Feuerwache (Kleinwache)
+        2: 100,   // Rettungswache
+        20: 100,  // Rettungswache (Kleinwache)
+        5: 80,    // Rettungshubschrauber
+        6: 400,   // Polizeiwache
+        19: 400,  // Polizeiwache (Kleinwache)
+        11: 250,  // BRP
+        13: 150,  // Polizeihubschrauber
+        17: 80,   // Polizei-Sondereinheiten
+        12: 140,  // SEG
+        9: 140,   // THW
+        21: 30,   // Rettungshundestaffel
+        15: 16,   // Wasserrettung
+        24: 200,  // Reiterstaffel
+        25: 100,  // Bergrettung
+        26: 30,   // Seenotrettung
+        28: 12    // Hubschrauber Seenotrettung
+    };
+
+    const buildingNames = {
+        0: 'Feuerwache',
+        1: 'Feuerwehrschule',
+        2: 'Rettungswache',
+        3: 'Rettungsschule',
+        4: 'Krankenhaus',
+        5: 'Rettungshubschrauber-Station',
+        6: 'Polizeiwache',
+        7: 'Leitstelle',
+        8: 'Polizeischule',
+        9: 'THW-Ortsverband',
+        10: 'THW Bundesschule',
+        11: 'BRP',
+        12: 'Schnelleinsatzgruppe (SEG)',
+        13: 'Polizeihubschrauberstation',
+        14: 'Bereitstellungsraum',
+        15: 'Wasserrettung',
+        16: 'Verbandszellen',
+        17: 'Polizei-Sondereinheiten',
+        18: 'Feuerwache (Kleinwache)',
+        19: 'Polizeiwache (Kleinwache)',
+        20: 'Rettungswache (Kleinwache)',
+        21: 'Rettungshundestaffel',
+        22: 'Großer Komplex',
+        23: 'Kleiner Komplex',
+        24: 'Reiterstaffel',
+        25: 'Bergrettung',
+        26: 'Seenotrettungswache',
+        27: 'Schule für Seefahrt und Seenotrettung',
+        28: 'Hubschrauberstation Seenotrettung'
+    };
+
+    // =======================
+    // API & Hilfsfunktionen
+    // =======================
+    function fetchUserBuildings() {
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: 'https://www.leitstellenspiel.de/api/buildings',
+                onload: function(response) {
+                    try {
+                        userBuildings = JSON.parse(response.responseText);
+                        resolve(true);
+                    } catch {
+                        resolve(false);
+                    }
+                },
+                onerror: () => resolve(false)
+            });
+        });
+    }
+
+    function clearMarkers() {
+        currentMarkers.forEach(marker => { if (map) map.removeLayer(marker); });
+        currentMarkers = [];
+        currentPois = [];
+    }
+
+    // =======================
+    // POI Generierung mit 1km Abstand
+    // =======================
+    function generatePOIs(centerLat, centerLon, count = 20) {
+        if (layoutMode === 'random') return generateRandomPOIs(centerLat, centerLon, count);
+        return generateGridPOIs(centerLat, centerLon, count);
+    }
+
+    function generateGridPOIs(centerLat, centerLon, count) {
+        const pois = [];
+        const kmInLat = 0.009;
+        const kmInLon = 0.009 / Math.cos(centerLat * Math.PI / 180);
+        const gridSize = Math.ceil(Math.sqrt(count));
+        const totalSize = gridSize - 1;
+        
+        const startLat = centerLat - (totalSize / 2) * kmInLat;
+        const startLon = centerLon - (totalSize / 2) * kmInLon;
+        
+        let built = 0;
+        for (let row = 0; row < gridSize; row++) {
+            for (let col = 0; col < gridSize; col++) {
+                if (built >= count) break;
+                
+                const lat = startLat + (row * kmInLat);
+                const lon = startLon + (col * kmInLon);
+                const buildingName = `${buildingNames[selectedBuildingType]} ${currentCityName} ${built + 1}`;
+                
+                pois.push({ 
+                    name: buildingName, 
+                    lat: lat.toFixed(6), 
+                    lon: lon.toFixed(6), 
+                    city: currentCityName,
+                    type: selectedBuildingType
+                });
+                built++;
+            }
+        }
+        return pois;
+    }
+
+    function generateRandomPOIs(centerLat, centerLon, count) {
+        const pois = [];
+        const maxRadius = Math.ceil(Math.sqrt(count) * 0.5);
+        
+        for (let i = 0; i < count; i++) {
+            let attempts = 0;
+            let validPosition = false;
+            let lat, lon;
+            
+            while (!validPosition && attempts < 100) {
+                const angle = Math.random() * 2 * Math.PI;
+                const distance = 1 + (Math.random() * (maxRadius - 1));
+                
+                const deltaLat = (distance / 111) * Math.cos(angle);
+                const deltaLon = (distance / (111 * Math.cos(centerLat * Math.PI / 180))) * Math.sin(angle);
+                
+                lat = centerLat + deltaLat;
+                lon = centerLon + deltaLon;
+                
+                validPosition = true;
+                for (const poi of pois) {
+                    const dist = calculateDistance(lat, lon, parseFloat(poi.lat), parseFloat(poi.lon));
+                    if (dist < 1.0) {
+                        validPosition = false;
+                        break;
+                    }
+                }
+                attempts++;
+            }
+            
+            const buildingName = `${buildingNames[selectedBuildingType]} ${currentCityName} ${i + 1}`;
+            pois.push({ 
+                name: buildingName, 
+                lat: lat.toFixed(6), 
+                lon: lon.toFixed(6), 
+                city: currentCityName,
+                type: selectedBuildingType
+            });
+        }
+        return pois;
+    }
+
+    function calculateDistance(lat1, lon1, lat2, lon2) {
+        const R = 6371;
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLon = (lon2 - lon1) * Math.PI / 180;
+        const a = 
+            Math.sin(dLat/2) * Math.sin(dLat/2) +
+            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+            Math.sin(dLon/2) * Math.sin(dLon/2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        return R * c;
+    }
+
+    // =======================
+    // Marker-Funktionen
+    // =======================
+    function createDraggableMarker(lat, lng, name, index) {
+        const editIcon = L.divIcon({
+            className: 'draggable-marker',
+            html: `<div style="background-color: #e74c3c; border: 3px solid #c0392b; width: 20px; height: 20px; border-radius: 50%; cursor: move;"></div>`,
+            iconSize: [20, 20],
+            iconAnchor: [10, 10]
+        });
+
+        const marker = L.marker([lat, lng], {
+            icon: editIcon,
+            draggable: isEditMode
+        });
+
+        marker.bindPopup(`
+            <strong>${name}</strong><br>
+            Position: ${lat}, ${lng}<br>
+            <button onclick="window.updatePoiPosition(${index}, ${lat}, ${lng})" class="btn btn-xs btn-success">Position speichern</button>
+            <button onclick="window.removePoi(${index})" class="btn btn-xs btn-danger">Entfernen</button>
+        `);
+
+        marker.on('dragend', function(e) {
+            const newLat = e.target.getLatLng().lat;
+            const newLng = e.target.getLatLng().lng;
+            window.updatePoiPosition(index, newLat, newLng);
+            
+            marker.getPopup().setContent(`
+                <strong>${name}</strong><br>
+                Position: ${newLat.toFixed(6)}, ${newLng.toFixed(6)}<br>
+                <button onclick="window.updatePoiPosition(${index}, ${newLat}, ${newLng})" class="btn btn-xs btn-success">Position speichern</button>
+                <button onclick="window.removePoi(${index})" class="btn btn-xs btn-danger">Entfernen</button>
+            `);
+        });
+
+        return marker;
+    }
+
+    function updatePoiPosition(index, lat, lng) {
+        if (index >= 0 && index < currentPois.length) {
+            currentPois[index].lat = lat.toFixed(6);
+            currentPois[index].lon = lng.toFixed(6);
+            
+            if (map) map.removeLayer(currentMarkers[index]);
+            currentMarkers[index] = createDraggableMarker(lat, lng, currentPois[index].name, index);
+            currentMarkers[index].addTo(map);
+            
+            if (window.bepolInfo) window.bepolInfo.textContent = `✅ Position von ${currentPois[index].name} aktualisiert`;
+        }
+    }
+
+    function removePoi(index) {
+        if (index >= 0 && index < currentPois.length) {
+            const name = currentPois[index].name;
+            
+            if (map) map.removeLayer(currentMarkers[index]);
+            currentPois.splice(index, 1);
+            currentMarkers.splice(index, 1);
+            
+            currentMarkers.forEach((marker, newIndex) => {
+                if (marker && marker.getPopup()) {
+                    const poi = currentPois[newIndex];
+                    marker.getPopup().setContent(`
+                        <strong>${poi.name}</strong><br>
+                        Position: ${poi.lat}, ${poi.lon}<br>
+                        <button onclick="window.updatePoiPosition(${newIndex}, ${parseFloat(poi.lat)}, ${parseFloat(poi.lon)})" class="btn btn-xs btn-success">Position speichern</button>
+                        <button onclick="window.removePoi(${newIndex})" class="btn btn-xs btn-danger">Entfernen</button>
+                    `);
+                }
+            });
+            
+            if (window.bepolInfo) window.bepolInfo.textContent = `🗑️ ${name} entfernt - ${currentPois.length} Wachen verbleibend`;
+            
+            if (currentPois.length === 0 && window.autoBuildButton) {
+                window.autoBuildButton.disabled = true;
+            }
+        }
+    }
+
+    function toggleEditMode() {
+        isEditMode = !isEditMode;
+        
+        currentMarkers.forEach((marker, index) => {
+            if (marker) {
+                marker.dragging.enable();
+                
+                const newIcon = L.divIcon({
+                    className: 'draggable-marker',
+                    html: `<div style="background-color: ${isEditMode ? '#f39c12' : '#e74c3c'}; border: 3px solid ${isEditMode ? '#e67e22' : '#c0392b'}; width: 20px; height: 20px; border-radius: 50%; cursor: move;"></div>`,
+                    iconSize: [20, 20],
+                    iconAnchor: [10, 10]
+                });
+                
+                marker.setIcon(newIcon);
+            }
+        });
+        
+        if (window.editModeButton) {
+            window.editModeButton.textContent = isEditMode ? "✏️ Edit-Modus: AN" : "✏️ Edit-Modus: AUS";
+            window.editModeButton.style.background = isEditMode ? '#f39c12' : '#3498db';
+        }
+        
+        if (window.bepolInfo) {
+            window.bepolInfo.textContent = isEditMode ? 
+                "✏️ Edit-Modus aktiv - Marker können verschoben werden" : 
+                "✏️ Edit-Modus deaktiviert";
+        }
+    }
+
+    // =======================
+    // Personal-Management Funktionen
+    // =======================
+    async function configureBuildingPersonnel(buildingId, buildingType) {
+        return new Promise((resolve) => {
+            const targetPersonnel = personnelSettings[buildingType];
+            
+            if (!targetPersonnel) {
+                resolve(false);
+                return;
+            }
+
+            // Personal-Sollstärke setzen
+            setTimeout(() => {
+                const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content;
+                if (!csrfToken) {
+                    resolve(false);
+                    return;
+                }
+
+                const formData = new URLSearchParams();
+                formData.append('_method', 'put');
+                formData.append('authenticity_token', csrfToken);
+                formData.append('building[personal_count_target]', targetPersonnel.toString());
+
+                fetch(`/buildings/${buildingId}?personal_count_target_only=1`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: formData.toString()
+                })
+                .then(response => {
+                    if (response.ok) {
+                        // Automatisches Werben aktivieren
+                        return fetch(`/buildings/${buildingId}/hire_do/automatic`);
+                    }
+                    return Promise.reject('Fehler beim Setzen der Personalstärke');
+                })
+                .then(response => {
+                    if (response.ok) {
+                        console.log(`✅ Gebäude ${buildingId} konfiguriert: ${targetPersonnel} Personal + automatisches Werben`);
+                        resolve(true);
+                    } else {
+                        resolve(false);
+                    }
+                })
+                .catch(error => {
+                    console.log('❌ Fehler bei Personal-Konfiguration:', error);
+                    resolve(false);
+                });
+            }, 2000);
+        });
+    }
+
+    // =======================
+    // Bau-Funktionen mit integriertem Personal-Management
+    // =======================
+    function openBuildMenu() {
+        const btn = document.querySelector('a#build_new_building');
+        if (btn) { btn.click(); return true; }
+        return false;
+    }
+
+    function setLeitstelle(id) {
+        const select = document.getElementById('building_leitstelle_building_id');
+        if (select) select.value = id;
+    }
+
+    function setBuildAnotherCheckbox(checked) {
+        const buildAnotherCheckbox = document.getElementById('build_another');
+        if (buildAnotherCheckbox) {
+            buildAnotherCheckbox.checked = checked;
+            return true;
+        }
+        return false;
+    }
+
+    async function buildAtLocation(lat, lon, name, buildingType = '11', isLast = false) {
+        return new Promise((resolve) => {
+            const checkMenu = setInterval(() => {
+                const nameInput = document.getElementById('building_name');
+                const typeSelect = document.getElementById('building_building_type');
+                if (nameInput && typeSelect) {
+                    clearInterval(checkMenu);
+
+                    setBuildAnotherCheckbox(!isLast);
+
+                    nameInput.value = name;
+                    typeSelect.value = buildingType;
+                    document.getElementById('building_latitude').value = lat;
+                    document.getElementById('building_longitude').value = lon;
+                    if (selectedLeitstelle) setLeitstelle(selectedLeitstelle);
+
+                    setTimeout(() => {
+                        const buildBtn = document.querySelector(`#detail_${buildingType} .build_with_credits_step`);
+                        if (buildBtn) buildBtn.click();
+
+                        // Warte auf Bau-Abschluss
+                        setTimeout(async () => {
+                            if (document.querySelector('.alert-success')) {
+                                // Erfolgreich gebaut - jetzt Building-ID ermitteln und Personal konfigurieren
+                                const buildingId = await getLatestBuildingId();
+                                if (buildingId) {
+                                    await configureBuildingPersonnel(buildingId, parseInt(buildingType));
+                                }
+                                resolve(true);
+                            } else {
+                                if (isLast) {
+                                    const backButton = document.getElementById('building_back_button');
+                                    if (backButton) backButton.click();
+                                }
+                                resolve(false);
+                            }
+                        }, 4000);
+                    }, 1200);
+                }
+            }, 200);
+            setTimeout(() => clearInterval(checkMenu), 4000);
+        });
+    }
+
+    async function getLatestBuildingId() {
+        return new Promise((resolve) => {
+            // Kurz warten bis das Gebäude in der API verfügbar ist
+            setTimeout(() => {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url: 'https://www.leitstellenspiel.de/api/buildings',
+                    onload: function(response) {
+                        try {
+                            const buildings = JSON.parse(response.responseText);
+                            if (buildings && buildings.length > 0) {
+                                // Neuestes Gebäude (höchste ID) finden
+                                const latestBuilding = buildings.reduce((latest, current) => 
+                                    current.id > latest.id ? current : latest
+                                );
+                                resolve(latestBuilding.id);
+                            } else {
+                                resolve(null);
+                            }
+                        } catch {
+                            resolve(null);
+                        }
+                    },
+                    onerror: () => resolve(null)
+                });
+            }, 3000);
+        });
+    }
+
+    async function startAutoBuild(pois) {
+        if (isBuilding) return;
+        isBuilding = true;
+        
+        if (window.bepolInfo) {
+            window.bepolInfo.innerHTML = "🏗️ Starte automatischen Bau mit Personal-Konfiguration...<br>" +
+                                       "📋 Personal-Sollstärken und automatisches Werben werden gesetzt";
+        }
+
+        if (!openBuildMenu()) {
+            if (window.bepolInfo) window.bepolInfo.textContent = "❌ Bau-Menü konnte nicht geöffnet werden!";
+            isBuilding = false;
+            return;
+        }
+
+        await new Promise(r => setTimeout(r, 3000));
+
+        let successCount = 0;
+        let personalConfigCount = 0;
+
+        for (let i = 0; i < pois.length && isBuilding; i++) {
+            const statusText = `🏗️ Baue ${pois[i].name} (${i + 1}/${pois.length})...`;
+            if (window.bepolInfo) window.bepolInfo.textContent = statusText;
+            
+            const isLastBuilding = (i === pois.length - 1);
+            const buildSuccess = await buildAtLocation(pois[i].lat, pois[i].lon, pois[i].name, selectedBuildingType, isLastBuilding);
+
+            if (buildSuccess) {
+                successCount++;
+                personalConfigCount++;
+            }
+
+            // Status-Update
+            if (window.bepolInfo) {
+                window.bepolInfo.innerHTML = 
+                    `✅ ${successCount}/${pois.length} Gebäude gebaut<br>` +
+                    `📋 ${personalConfigCount} Personal-Konfigurationen durchgeführt<br>` +
+                    `⏳ Nächstes: ${pois[i].name}`;
+            }
+
+            if (!isLastBuilding) {
+                await new Promise(r => setTimeout(r, 7000));
+
+                const waitForForm = setInterval(() => {
+                    const nameInput = document.getElementById('building_name');
+                    if (nameInput && nameInput.value === '') {
+                        clearInterval(waitForForm);
+                    }
+                }, 100);
+
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        }
+
+        if (window.bepolInfo) {
+            window.bepolInfo.innerHTML = 
+                `✅ Automatischer Bau abgeschlossen!<br>` +
+                `🏗️ ${successCount} Gebäude gebaut<br>` +
+                `📋 ${personalConfigCount} Personal-Konfigurationen durchgeführt`;
+        }
+        
+        isBuilding = false;
+        if (window.autoBuildButton) {
+            window.autoBuildButton.textContent = "🏗️ Automatisch bauen + Personal";
+            window.autoBuildButton.classList.remove('building');
+        }
+    }
+
+    function stopAutoBuild() {
+        isBuilding = false;
+        setBuildAnotherCheckbox(false);
+        const backButton = document.getElementById('building_back_button');
+        if (backButton) backButton.click();
+
+        if (window.bepolInfo) window.bepolInfo.textContent = "⏹️ Automatischer Bau gestoppt.";
+        if (window.autoBuildButton) {
+            window.autoBuildButton.textContent = "🏗️ Automatisch bauen + Personal";
+            window.autoBuildButton.classList.remove('building');
+        }
+    }
+
+    // =======================
+    // UI-Erstellung
+    // =======================
+    function createUI() {
+        const waitForMap = setInterval(() => {
+            if (typeof map !== 'undefined') {
+                clearInterval(waitForMap);
+
+                const ui = document.createElement('div');
+                ui.id = 'bepolControl';
+                ui.innerHTML = `
+                    <div style="background:#c9302c; color:white; padding:8px; margin:-12px -12px 8px -12px; border-radius:8px 8px 0 0; text-align:center;">
+                        <strong>🏗️ Wachen-Bau + Personal-Manager</strong>
+                    </div>
+                    <input id="cityInput" placeholder="🏙️ Stadtname eingeben">
+                    <div class="control-row">
+                        <select id="buildingType"></select>
+                        <select id="layoutSelect">
+                            <option value="grid">📐 Gitter (1km Abstand)</option>
+                            <option value="random">🎲 Zufällig (1km Abstand)</option>
+                        </select>
+                    </div>
+                    <div class="control-row">
+                        <input type="number" id="poiCount" min="1" max="50" value="10" placeholder="Anzahl Wachen">
+                    </div>
+                    <div class="leitstelle-row">
+                        <div class="control-label">Leitstelle (optional)</div>
+                        <select id="leitstelleSelect"><option value="">Keine Leitstelle</option><option>Lade...</option></select>
+                        <button id="refreshLeitstellen">🔄</button>
+                    </div>
+                    <button id="searchButton">📍 Wachen generieren</button>
+                    <button id="editModeButton">✏️ Edit-Modus: AUS</button>
+                    <button id="autoBuildButton" disabled>🏗️ Automatisch bauen + Personal</button>
+                    <div id="info" class="bepol-info">
+                        <div>✅ 1km Mindestabstand zwischen Wachen</div>
+                        <div>📋 Personal-Sollstärken werden automatisch gesetzt</div>
+                        <div>🔔 Automatisches Werben wird aktiviert</div>
+                    </div>
+                `;
+                document.body.appendChild(ui);
+
+                // CSS injecten
+                const style = document.createElement('style');
+                style.textContent = `
+                    #bepolControl {
+                        position: absolute; top: 15px; left: 15px; z-index: 10000;
+                        background:#2c3e50; padding:12px; border-radius:8px;
+                        color:#ecf0f1; font-family:Arial; width:350px;
+                        cursor:move;
+                        box-sizing: border-box;
+                    }
+                    #bepolControl * {
+                        box-sizing: border-box;
+                    }
+                    #bepolControl input, #bepolControl select {
+                        width:100%; margin-top:4px; padding:6px; border-radius:4px; border:none;
+                        background: #34495e; color: #ecf0f1;
+                    }
+                    .control-row { display:flex; gap:6px; margin-top:4px; }
+                    .leitstelle-row { display:flex; gap:4px; align-items:center; margin-top:8px; }
+                    .leitstelle-row select { flex:1; margin-top:0; }
+                    .leitstelle-row button { width:auto; padding:6px 8px; }
+
+                    #bepolControl button {
+                        width: 100%;
+                        background: #3498db;
+                        color: white;
+                        border: none;
+                        padding: 8px;
+                        border-radius: 4px;
+                        cursor: pointer;
+                        font-weight: bold;
+                        margin-top: 4px;
+                    }
+                    #bepolControl button:hover {
+                        background: #2980b9;
+                    }
+                    #bepolControl button:disabled {
+                        background: #7f8c8d;
+                        cursor: not-allowed;
+                    }
+                    #autoBuildButton.building {
+                        background: #e74c3c;
+                    }
+                    #autoBuildButton.building:hover {
+                        background: #c0392b;
+                    }
+
+                    .bepol-info { 
+                        margin-top:8px; 
+                        font-size:11px; 
+                        text-align:left;
+                        line-height:1.3;
+                        background: #34495e;
+                        padding: 8px;
+                        border-radius: 4px;
+                    }
+                    .control-label { 
+                        font-size: 11px; 
+                        color: #bdc3c7; 
+                        white-space: nowrap;
+                    }
+
+                    .draggable-marker {
+                        background: transparent !important;
+                        border: none !important;
+                    }
+                    
+                    .btn {
+                        display: inline-block;
+                        padding: 4px 8px;
+                        margin: 2px;
+                        border: none;
+                        border-radius: 3px;
+                        cursor: pointer;
+                        font-size: 11px;
+                        text-decoration: none;
+                    }
+                    .btn-xs {
+                        padding: 2px 6px;
+                        font-size: 10px;
+                    }
+                    .btn-success {
+                        background: #27ae60;
+                        color: white;
+                    }
+                    .btn-danger {
+                        background: #e74c3c;
+                        color: white;
+                    }
+                `;
+                document.head.appendChild(style);
+
+                const typeSelect = document.getElementById('buildingType');
+                Object.entries(buildingNames).forEach(([id, name]) => {
+                    // Nur Gebäudetypen anzeigen, die Personal unterstützen
+                    if (personnelSettings.hasOwnProperty(parseInt(id))) {
+                        const opt = document.createElement('option');
+                        opt.value = id;
+                        opt.textContent = `${name} (ID ${id})`;
+                        if (id == 11) opt.selected = true;
+                        typeSelect.appendChild(opt);
+                    }
+                });
+
+                window.bepolInfo = document.getElementById('info');
+                window.autoBuildButton = document.getElementById('autoBuildButton');
+                window.editModeButton = document.getElementById('editModeButton');
+
+                // Globale Funktionen verfügbar machen
+                window.updatePoiPosition = updatePoiPosition;
+                window.removePoi = removePoi;
+
+                async function loadLeitstellen() {
+                    window.bepolInfo.innerHTML = '🔄 Lade Leitstellen...';
+                    const success = await fetchUserBuildings();
+                    const sel = document.getElementById('leitstelleSelect');
+                    sel.innerHTML = '<option value="">Keine Leitstelle</option>';
+                    if (success) {
+                        const list = userBuildings.filter(b => b.building_type === 7)
+                                                  .sort((a, b) => a.caption.localeCompare(b.caption));
+                        list.forEach(l => {
+                            const opt = document.createElement('option');
+                            opt.value = l.id;
+                            opt.textContent = l.caption || `Leitstelle ${l.id}`;
+                            sel.appendChild(opt);
+                        });
+                        window.bepolInfo.innerHTML = `✅ ${list.length} Leitstellen geladen`;
+                    } else {
+                        window.bepolInfo.innerHTML = '❌ Fehler beim Laden';
+                    }
+                }
+                loadLeitstellen();
+                document.getElementById('refreshLeitstellen').onclick = loadLeitstellen;
+
+                document.getElementById('layoutSelect').onchange = e => layoutMode = e.target.value;
+                typeSelect.onchange = e => selectedBuildingType = parseInt(e.target.value);
+                document.getElementById('leitstelleSelect').onchange = e => selectedLeitstelle = e.target.value;
+
+                document.getElementById('searchButton').onclick = () => {
+                    const city = document.getElementById('cityInput').value.trim();
+                    const count = parseInt(document.getElementById('poiCount').value) || 10;
+                    
+                    if (!city) {
+                        window.bepolInfo.textContent = "❌ Bitte Stadtnamen eingeben!";
+                        return;
+                    }
+                    
+                    if (count < 1 || count > 50) {
+                        window.bepolInfo.textContent = "❌ Anzahl muss zwischen 1 und 50 liegen!";
+                        return;
+                    }
+
+                    window.bepolInfo.textContent = '🔎 Suche Stadt...';
+                    fetch(`https://nominatim.openstreetmap.org/search?city=${encodeURIComponent(city)}&format=json&limit=1`)
+                        .then(r => r.json())
+                        .then(data => {
+                            if (!data.length) throw new Error('Stadt nicht gefunden');
+                            const lat = parseFloat(data[0].lat);
+                            const lon = parseFloat(data[0].lon);
+                            currentCityName = data[0].display_name.split(',')[0];
+                            clearMarkers();
+                            currentPois = generatePOIs(lat, lon, count);
+                            
+                            currentPois.forEach((poi, index) => {
+                                const marker = createDraggableMarker(
+                                    parseFloat(poi.lat), 
+                                    parseFloat(poi.lon), 
+                                    poi.name, 
+                                    index
+                                );
+                                marker.addTo(map);
+                                currentMarkers.push(marker);
+                            });
+                            
+                            map.setView([lat, lon], 12);
+                            const personnelSetting = personnelSettings[selectedBuildingType] || 'Automatisch';
+                            window.bepolInfo.innerHTML = 
+                                `✅ ${currentPois.length} ${buildingNames[selectedBuildingType]} in ${currentCityName}<br>` +
+                                `📏 1km Mindestabstand zwischen Wachen<br>` +
+                                `👥 Personal-Soll: ${personnelSetting}`;
+                            window.autoBuildButton.disabled = false;
+                        })
+                        .catch(err => { 
+                            window.bepolInfo.textContent = '❌ ' + err.message; 
+                        });
+                };
+
+                window.editModeButton.onclick = toggleEditMode;
+
+                window.autoBuildButton.onclick = () => {
+                    if (isBuilding) {
+                        stopAutoBuild();
+                    } else {
+                        window.autoBuildButton.textContent = "⏹️ Bau stoppen";
+                        window.autoBuildButton.classList.add('building');
+                        startAutoBuild(currentPois);
+                    }
+                };
+
+                // Dragbar für UI
+                ui.onmousedown = function(e) {
+                    let shiftX = e.clientX - ui.getBoundingClientRect().left;
+                    let shiftY = e.clientY - ui.getBoundingClientRect().top;
+                    function moveAt(pageX, pageY) {
+                        ui.style.left = pageX - shiftX + 'px';
+                        ui.style.top = pageY - shiftY + 'px';
+                    }
+                    function onMouseMove(e) { moveAt(e.pageX, e.pageY); }
+                    document.addEventListener('mousemove', onMouseMove);
+                    ui.onmouseup = function() {
+                        document.removeEventListener('mousemove', onMouseMove);
+                        ui.onmouseup = null;
+                    };
+                };
+                ui.ondragstart = () => false;
+            }
+        }, 1000);
+    }
+
+    // =======================
+    // Start
+    // =======================
+    createUI();
+})();

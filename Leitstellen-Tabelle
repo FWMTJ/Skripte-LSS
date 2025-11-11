@@ -1,0 +1,353 @@
+// ==UserScript==
+// @name         Leitstellenspiel Leitstellen-Tabelle
+// @namespace    http://tampermonkey.net/
+// @version      1.2
+// @description  Zeigt Leitstellendaten des Leitstellenspiels als Tabelle an
+// @author       You
+// @match        https://www.leitstellenspiel.de/
+// @match        https://www.leitstellenspiel.de/*
+// @grant        GM_xmlhttpRequest
+// @connect      leitstellenspiel.de
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Gebäudetyp-Definitionen
+    const buildingTypes = {
+        0: "Feuerwache",
+        1: "Feuerwehrschule",
+        2: "Rettungswache",
+        3: "Rettungsschule",
+        4: "Krankenhaus",
+        5: "Rettungshubschrauber-Station",
+        6: "Polizeiwache",
+        7: "Leitstelle",
+        8: "Polizeischule",
+        9: "THW-Ortsverband",
+        10: "THW Bundesschule",
+        11: "Bereitschaftspolizei",
+        12: "Schnelleinsatzgruppe (SEG)",
+        13: "Polizeihubschrauberstation",
+        14: "Bereitstellungsraum",
+        15: "Wasserrettung",
+        16: "Verbandszellen",
+        17: "Polizei-Sondereinheiten",
+        18: "Feuerwache (Kleinwache)",
+        19: "Polizeiwache (Kleinwache)",
+        20: "Rettungswache (Kleinwache)",
+        21: "Rettungshundestaffel",
+        22: "Großer Komplex",
+        23: "Kleiner Komplex",
+        24: "Reiterstaffel",
+        25: "Bergrettung",
+        26: "Seenotrettungswache",
+        27: "Schule für Seefahrt und Seenotrettung",
+        28: "Hubschrauberstation (Seenotrettung)"
+    };
+
+    // Funktion zum Erstellen der Tabelle
+    function createBuildingsTable(buildings) {
+        // Filtere nur Gebäude Typ 7 (Leitstellen)
+        const leitstellen = buildings.filter(building => building.building_type === 7);
+
+        // Entferne vorhandene Tabelle falls vorhanden
+        const existingTable = document.getElementById('leitstellenTable');
+        if (existingTable) {
+            document.body.removeChild(existingTable);
+        }
+
+        // Erstelle Tabellen-Container
+        const container = document.createElement('div');
+        container.id = 'leitstellenTable';
+        container.style.cssText = `
+            position: fixed;
+            top: 60px;
+            right: 10px;
+            background: white;
+            border: 2px solid #0066cc;
+            border-radius: 5px;
+            padding: 15px;
+            max-height: 80vh;
+            overflow-y: auto;
+            z-index: 10000;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+            min-width: 700px;
+            font-family: Arial, sans-serif;
+        `;
+
+        // Titel
+        const title = document.createElement('h3');
+        title.textContent = `📞 Leitstellen (Typ 7) - ${leitstellen.length} Gebäude`;
+        title.style.cssText = 'margin-top: 0; color: #0066cc; text-align: center;';
+        container.appendChild(title);
+
+        // Tabelle erstellen
+        const table = document.createElement('table');
+        table.style.cssText = 'width: 100%; border-collapse: collapse; font-size: 12px;';
+
+        // Tabellenkopf
+        const thead = document.createElement('thead');
+        thead.innerHTML = `
+            <tr style="background-color: #f0f8ff;">
+                <th style="border: 1px solid #ccc; padding: 6px; text-align: left;">ID</th>
+                <th style="border: 1px solid #ccc; padding: 6px; text-align: left;">Leitstellen-Name</th>
+                <th style="border: 1px solid #ccc; padding: 6px; text-align: center;">Personal</th>
+                <th style="border: 1px solid #ccc; padding: 6px; text-align: center;">Fahrzeuge</th>
+                <th style="border: 1px solid #ccc; padding: 6px; text-align: left;">Koordinaten</th>
+            </tr>
+        `;
+        table.appendChild(thead);
+
+        // Tabellenkörper
+        const tbody = document.createElement('tbody');
+
+        if (leitstellen.length === 0) {
+            const row = document.createElement('tr');
+            row.innerHTML = `<td colspan="5" style="text-align: center; padding: 10px; color: #666;">Keine Leitstellen gefunden</td>`;
+            tbody.appendChild(row);
+        } else {
+            leitstellen.forEach(building => {
+                const row = document.createElement('tr');
+                row.style.borderBottom = '1px solid #eee';
+                row.innerHTML = `
+                    <td style="border: 1px solid #ccc; padding: 6px; font-weight: bold;">${building.id}</td>
+                    <td style="border: 1px solid #ccc; padding: 6px;"><strong>${building.caption || 'Unbenannte Leitstelle'}</strong></td>
+                    <td style="border: 1px solid #ccc; padding: 6px; text-align: center;">${building.personal_count || 0}</td>
+                    <td style="border: 1px solid #ccc; padding: 6px; text-align: center;">${building.vehicles_count || 0}</td>
+                    <td style="border: 1px solid #ccc; padding: 6px; font-size: 11px; color: #666;">${building.latitude?.toFixed(4) || 'N/A'}, ${building.longitude?.toFixed(4) || 'N/A'}</td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        table.appendChild(tbody);
+        container.appendChild(table);
+
+        // Button-Container
+        const buttonContainer = document.createElement('div');
+        buttonContainer.style.cssText = 'display: flex; gap: 10px; margin-top: 15px;';
+
+        // Schließen-Button
+        const closeButton = document.createElement('button');
+        closeButton.textContent = '❌ Schließen';
+        closeButton.style.cssText = `
+            padding: 8px 15px;
+            background: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            flex: 1;
+            font-size: 12px;
+        `;
+        closeButton.onclick = function() {
+            document.body.removeChild(container);
+        };
+
+        // Export-Button
+        const exportButton = document.createElement('button');
+        exportButton.textContent = '💾 Als CSV exportieren';
+        exportButton.style.cssText = `
+            padding: 8px 15px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            flex: 1;
+            font-size: 12px;
+        `;
+        exportButton.onclick = function() {
+            exportToCSV(leitstellen);
+        };
+
+        // Alle Gebäude anzeigen Button
+        const allBuildingsButton = document.createElement('button');
+        allBuildingsButton.textContent = '🏢 Alle Gebäude';
+        allBuildingsButton.style.cssText = `
+            padding: 8px 15px;
+            background: #6c757d;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            flex: 1;
+            font-size: 12px;
+        `;
+        allBuildingsButton.onclick = function() {
+            showAllBuildings(buildings);
+        };
+
+        buttonContainer.appendChild(exportButton);
+        buttonContainer.appendChild(allBuildingsButton);
+        buttonContainer.appendChild(closeButton);
+        container.appendChild(buttonContainer);
+
+        document.body.appendChild(container);
+    }
+
+    // Funktion zum Anzeigen aller Gebäude
+    function showAllBuildings(buildings) {
+        const container = document.createElement('div');
+        container.id = 'allBuildingsTable';
+        container.style.cssText = `
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: white;
+            border: 2px solid #333;
+            border-radius: 5px;
+            padding: 20px;
+            max-height: 90vh;
+            overflow-y: auto;
+            z-index: 10001;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+            min-width: 800px;
+            font-family: Arial, sans-serif;
+        `;
+
+        const title = document.createElement('h3');
+        title.textContent = `🏢 Alle Gebäude - ${buildings.length} Gebäude`;
+        title.style.cssText = 'margin-top: 0; color: #333; text-align: center;';
+        container.appendChild(title);
+
+        const table = document.createElement('table');
+        table.style.cssText = 'width: 100%; border-collapse: collapse; font-size: 11px;';
+
+        const thead = document.createElement('thead');
+        thead.innerHTML = `
+            <tr style="background-color: #f8f9fa;">
+                <th style="border: 1px solid #ccc; padding: 4px;">ID</th>
+                <th style="border: 1px solid #ccc; padding: 4px;">Name</th>
+                <th style="border: 1px solid #ccc; padding: 4px;">Typ</th>
+                <th style="border: 1px solid #ccc; padding: 4px;">Personal</th>
+                <th style="border: 1px solid #ccc; padding: 4px;">Fahrzeuge</th>
+            </tr>
+        `;
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
+        buildings.forEach(building => {
+            const row = document.createElement('tr');
+            const buildingType = buildingTypes[building.building_type] || `Unbekannt (${building.building_type})`;
+            row.innerHTML = `
+                <td style="border: 1px solid #ccc; padding: 4px;">${building.id}</td>
+                <td style="border: 1px solid #ccc; padding: 4px;">${building.caption || 'Unbenannt'}</td>
+                <td style="border: 1px solid #ccc; padding: 4px;">${buildingType}</td>
+                <td style="border: 1px solid #ccc; padding: 4px; text-align: center;">${building.personal_count || 0}</td>
+                <td style="border: 1px solid #ccc; padding: 4px; text-align: center;">${building.vehicles_count || 0}</td>
+            `;
+            tbody.appendChild(row);
+        });
+
+        table.appendChild(tbody);
+        container.appendChild(table);
+
+        const closeButton = document.createElement('button');
+        closeButton.textContent = 'Schließen';
+        closeButton.style.cssText = `
+            margin-top: 10px;
+            padding: 8px 15px;
+            background: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            width: 100%;
+        `;
+        closeButton.onclick = function() {
+            document.body.removeChild(container);
+        };
+        container.appendChild(closeButton);
+
+        document.body.appendChild(container);
+    }
+
+    // CSV Export-Funktion
+    function exportToCSV(leitstellen) {
+        const headers = ['ID', 'Name', 'Personal', 'Fahrzeuge', 'Latitude', 'Longitude'];
+        const csvContent = [
+            headers.join(','),
+            ...leitstellen.map(building => [
+                building.id,
+                `"${(building.caption || '').replace(/"/g, '""')}"`,
+                building.personal_count || 0,
+                building.vehicles_count || 0,
+                building.latitude || '',
+                building.longitude || ''
+            ].join(','))
+        ].join('\n');
+
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        const url = URL.createObjectURL(blob);
+        link.setAttribute('href', url);
+        link.setAttribute('download', `leitstellenspiel_leitstellen_${new Date().toISOString().split('T')[0]}.csv`);
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
+
+    // API-Daten abrufen
+    function loadBuildingsData() {
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: 'https://www.leitstellenspiel.de/api/buildings',
+            onload: function(response) {
+                if (response.status === 200) {
+                    try {
+                        const buildings = JSON.parse(response.responseText);
+                        createBuildingsTable(buildings);
+                    } catch (e) {
+                        alert('Fehler beim Verarbeiten der Daten: ' + e.message);
+                    }
+                } else {
+                    alert('Fehler beim Laden der Daten: ' + response.status);
+                }
+            },
+            onerror: function(error) {
+                alert('Fehler beim API-Aufruf: ' + error);
+            }
+        });
+    }
+
+    // Button zum Öffnen der Tabelle hinzufügen
+    function addControlButton() {
+        // Entferne vorhandenen Button falls vorhanden
+        const existingButton = document.getElementById('lsControlButton');
+        if (existingButton) {
+            document.body.removeChild(existingButton);
+        }
+
+        const button = document.createElement('button');
+        button.id = 'lsControlButton';
+        button.textContent = '📞 Leitstellen anzeigen';
+        button.style.cssText = `
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            padding: 10px 15px;
+            background: #0066cc;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            z-index: 9999;
+            font-size: 14px;
+            font-weight: bold;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        `;
+        button.onclick = loadBuildingsData;
+        document.body.appendChild(button);
+    }
+
+    // Initialisierung
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', addControlButton);
+    } else {
+        addControlButton();
+    }
+})();
